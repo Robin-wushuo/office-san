@@ -1,55 +1,58 @@
-# todo: read, copy, paste, concurrent execution
-# variables: file extention of reading and pasting.
+"""License boilerplate."""
 
 
-class A:
-    """Fisrt class for idea. Interface."""
+class AbstractIO(object):
 
-    def __init__(self):
-        """Create a instance."""
-
-        self.text = ''
-        self.words = ''
-
-    def read(self, file):
-        """Extract text from file"""
-
-        # Read file
-        file = self.create(file)
-        # Return a short text
-
-    def copy(self, file):
-        """Copy the text."""
-
-        # Update self.words
-        self.text = self.read(file)
-        # re self.text
-        # Return the first match
-
-    def create(self, file):
-        # Factory method
+    def __init__(self, file):
+        self.file = file
 
 
-class B:
-    """About paste. Interface."""
+class Reader(AbstractIO):
+    """Reading interface of Bridge DP."""
 
-    def paste(self, words, FileB):
-        """Paste the words into the file."""
+    def read(self):
+        """Delegates to read method of implementor class.
 
-        # Paste self.words into file
-        file = self.create(FileB)
-        # Add some message about the execution
+        Extracts unicode contents from file.
+        Returns:
+            A string of contents.
+        """
+        return self.file.read()
 
-    def create(self, file):
-        # Factory method
+
+class PdfFile(object):
+    """PDF implementor of Bridge."""
+
+    def read(self):
+        """See read method of Reader class."""
+
+        # TODO(tika@github.com): Learn the package.
 
 
-def main():
-    """Run script."""
-    if __name__ == '__main__':
-        # Request email
-        # Run instance A.copy
-        # Run instance B.paste
-        # Move the original file to folder 'OriginFile'
-        # Delete OriginFile
-        # Email the zip file
+class WordFile(object):
+    """MS word implementor of Bridge."""
+
+    def read(self):
+        """See read method of Reader class."""
+
+        # TODO(Robin) Find a capable word package.
+
+
+class Writer(AbstractIO):
+    """Writing interface of Bridge DP."""
+
+    def write(self):
+        """Delegates to write method of implementor class.
+
+        Inserts unicode contents into file.
+        """
+        self.file.write()
+
+
+class ExcelFile(object):
+    """MS excel implementor of Bridge."""
+
+    def write(self):
+        """See write method of Writer class."""
+
+        # TODO(Robin) Find a capable excel pakcage.
