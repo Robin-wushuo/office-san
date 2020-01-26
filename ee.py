@@ -19,7 +19,6 @@ from xlsxwriter.utility import xl_rowcol_to_cell
 from tika import detector
 
 
-# TODO(Robin) Logging.
 # TODO(Robin) Store synonym_dict in a configure xml file.
 
 logging.basicConfig(filename='copa.log', filemode='w', level=logging.INFO)
