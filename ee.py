@@ -23,25 +23,7 @@ from tika import detector
 
 logging.basicConfig(filename='copa.log', filemode='w', level=logging.INFO)
 exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
-
 junk = {'from', 'to', 'full name'}
-
-name_synonym = {
-        'Premium Total Amount': ['Total Premium','Gross Annual Premium',
-            'ANNUAL MINIMUM& DEPOSIT PREMIUM'],
-        'Sum Insured': ['Limit of liability', 'Insured Interest'],
-        'Policy Period': ['Period'],
-        }
-
-word_synonym = {
-        'Client': ['Insured', 'Assured'],
-        'Name': ['Entity', ''],
-        'Risk': ['Type', 'Insurance Class', 'Class'],
-        'Policy': ['Insured'],
-        'No.': ['Number'],
-        'Sum': ['Total'],
-        }
-
 general_pat = r'(?i:\n{h})\s*(\s+\w+\s+)??\s*[:：]?\s*(?P<value>{v})'
 risk_pat = r'(?ia:\b[a-z ()]+(?=insurance)|[ ]+\w[\w ]+)'
 policy_pat = r'(?a:\w+)'
@@ -75,15 +57,31 @@ ft_pat3 = re.compile(
         (?P<f2>([^\n]+\n\n(?!\n)){,4})  # After page number
         .+?(?P=f1)0?[1-9](?P=f2).+?(?P=f1)0?[1-9](?P=f2)""", re.S | re.X)
 
+name_synonym = {
+        'Premium Total Amount': ['Total Premium','Gross Annual Premium',
+            'ANNUAL MINIMUM& DEPOSIT PREMIUM'],
+        'Sum Insured': ['Limit of liability', 'Insured Interest'],
+        'Policy Period': ['Period'],
+        }
+
+word_synonym = {
+        'Client': ['Insured', 'Assured'],
+        'Name': ['Entity', ''],
+        'Risk': ['Type', 'Insurance Class', 'Class'],
+        'Policy': ['Insured'],
+        'No.': ['Number'],
+        'Sum': ['Total'],
+        }
+
 
 def tikaparse(file):
-    """Returns parsed text without footnote except at the beginning."""
+    # Returns text of file without footnote except at the beginning.
     parsed = tika.parser.from_file(file)
     text = parsed['content']
     text = text[: len(text)//2]  # Arbitrary
     m = ft_pat3.search(text)
     if m:
-        # Uses repr() to match a literal backslash.
+        # Uses repr() to match a backslash.
         ft_pat = re.compile(
                 r'\n(\ndict://key[.][\dA-Z]+/[\da-z%]+)?'
                 + repr(m.group('f1'))[3 : -1]
@@ -93,7 +91,8 @@ def tikaparse(file):
     return text
 
 
-def _combine(name, pattern, junk=junk):
+def _fill_g(name, pattern, junk=junk):
+    # Fills general_pat with names and pattern and yields the pattern.
     pat_v = general_pat.replace('{v}', pattern, 1)
     index = name.find("(")  # Select "(...)" or not
     if index != -1:
@@ -103,12 +102,12 @@ def _combine(name, pattern, junk=junk):
             name = name[: index]
         else:
             name = appendage
-    for alias in get_alias(name):
+    for alias in get_alias(name):  # Maybe some other names
         yield pat_v.replace('{h}', alias.replace(' ', r'\s+'), 1)
 
 
 def get_match(text, name, pattern):
-    pats = _combine(name, pattern)  # Generates "names + pattern"
+    pats = _fill_g(name, pattern)  # pattern generator
     for pat in pats:
         m = re.search(pat, text)
         if m:
@@ -123,6 +122,7 @@ def _join_name(list_list):
 
 
 def get_alias(name):
+    # Yields name and other name from symonym dicts.
     if name in name_synonym:
         yield from (x for x in name_synonym[name])
     origin_name, synonyms = name, []
@@ -136,27 +136,34 @@ def get_alias(name):
     yield from _join_name(synonyms)
 
 
+# Can Excel use other template?
+# pandas read all worksheets?
+# Puts re pattern into xml file?
 class Excel(object):
-    """Produce some excel files based on the template."""
+    """Produce some excel files based on a template.
+
+    In order to meet the team requirement, template excel contanining
+    some informations about dropdown list, formula, width, format, re
+    and derive."""
 
     with pd.ExcelFile('background/template.xlsx') as xls:
         tdf = pd.read_excel(xls, 'template', index_col=0)
-        # dfs used by dervie method. df name dose matter.
-        clidf = pd.read_excel(xls, sheet_name='client_code')
-        insdf = pd.read_excel(xls, sheet_name='insurer_code')
-        _vdf = pd.read_excel(xls, sheet_name='data_validation')
+        xls.sheet_names.remove('template')
+        extra_data = pd.read_excel(xls, xls.sheet_names)
+        vdf = extra_data.get('valid')
 
     formula = tdf.loc['formula':'formula']
     formula = formula.apply(lambda x: x.str.strip('[]'), axis=1)
     formula.rename({'formula': 'value'}, axis='index', inplace=True)
     glb = globals()
 
+    # Contains self.find_in_text and more methods.
     def __init__(self, filename):
         self.filename = filename
         self.data = self.tdf['value':'value'].combine_first(self.formula)
 
     def find_in_text(self, text):
-        """Extracts columns from text and writes columns to excel."""
+        """Extracts value from text and assigns to self.data."""
         logging.info('file [%s]' % (self.filename))
         gmt = functools.partial(get_match, text)
         it = self._write_column()
@@ -179,27 +186,32 @@ class Excel(object):
             column, value = yield  # Push
             self.data.at['value', column] = value.replace('\n', '')
 
-    def derive(self, df, name1, name2):
+    def derive(self, name1, name2):
+        # Gets name2 value in df by name1 and assigns to self.data.
+        df = self.extra_data.get(name2, self.vdf)
         column1 = exo(name1, df.columns)[0]
         value = exo(self.data.at['value', name1], df[column1])[0]
         if name1 == name2:
             self.data.at['value', name1] = value
-        else:
+        else:  # df must has two columns to get column2.
             subdf = df[df[column1] == value]
             column2 = df.drop([column1], axis=1).columns[0]
             self.data.at['value', name2] = subdf.iloc[0][column2]
 
     def export(self, filename=None):
-        """Creats an excel file in a temporary directory."""
+        """Creats an excel in a temporary directory using self.data."""
         filename = filename or self.filename.replace('.pdf', '.xlsx', 1)
         with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
             workbook = writer.book
             num_fmt = workbook.add_format({'num_format': '#,##0.00'})
             pct_fmt = workbook.add_format({'num_format': '0%'})
             self.data.to_excel(writer, index=False)
-            self._vdf.to_excel(writer, 'DV', index=False)
-            dfsheet, dvsheet = writer.sheets.values()
-            dvsheet.set_column('A:A', None, pct_fmt)
+            dfsheet = writer.sheets['Sheet1']
+            if self.vdf is not None:
+                self.vdf.to_excel(writer, 'DV', index=False)
+                dvsheet = writer.sheets['DV']
+                # How about format?
+                dvsheet.set_column('A:A', None, pct_fmt)
             for number, name in enumerate(self.tdf):
                 width = self.tdf.at['width', name]
                 fmt = locals().get(self.tdf.at['format', name])
@@ -232,8 +244,7 @@ def main():
             xls.find_in_text(text)
             s_derive = xls.tdf.loc['derive'].dropna()
             for index, value in s_derive.items():
-                df_name = index[: 3].lower() + 'df'
-                xls.derive(Excel.__dict__.get(df_name, xls._vdf), value, index)
+                xls.derive(value, index)
             # Finds currency.
             if xls.data.at['value', 'Currency (Sum Insured)'] == 'CNY':
                 xls.data.at['value', 'Currency (Sum Insured)'] = (
@@ -255,8 +266,7 @@ def test2(file):
 
     s_derive = xls.tdf.loc['derive'].dropna()
     for index, value in s_derive.items():
-        df_name = index[: 3].lower() + 'df'
-        xls.derive(Excel.__dict__.get(df_name, xls._vdf), value, index)
+        xls.derive(value, index)
 
     # Finds currency.
     if xls.data.at['value', 'Currency (Sum Insured)'] == 'CNY':
