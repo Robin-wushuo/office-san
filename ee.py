@@ -1,5 +1,5 @@
 # This is a script, so it needs a script docstring.
-"""usage: see the argparse module in python standard library."""
+"""Usage: see the argparse module in python standard library."""
 
 import configparser
 import functools
@@ -9,7 +9,8 @@ import os
 import os.path
 import re
 import reprlib
-from argparse import ArgumentParser
+import sys
+import zipfile
 
 import pandas as pd
 import tika.parser
@@ -21,7 +22,6 @@ from tika import detector
 config = configparser.ConfigParser()
 config.read('config.ini')
 logging.basicConfig(filename='copa.log', filemode='w', level=logging.INFO)
-exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
 # <assume> Target text doesn't exceed page 9 and at least three footnote.
 ft_pat3 = re.compile(
@@ -43,8 +43,8 @@ def tikaparse(file):
                 r'\n(\ndict://key[.][\dA-Z]+/[\da-z%]+)?'
                 + repr(m.group('f1'))[3 : -1]
                 + r'0?[1-9]' + repr(m.group('f2'))[1 : -1])
-        ft = ft_pat.pattern.lower().replace(' policy', '\npolicy')
-        text = ft + ft_pat.sub('', text)
+        footnote = ft_pat.pattern.lower().replace(' policy', '\npolicy')
+        text = footnote + ft_pat.sub('', text)
     return text
 
 
@@ -59,9 +59,9 @@ def get_match(text, name, pattern):
 
 def get_alias(name, junk=config['junk']):
     # Yields name and other name from symonym dicts.
-    index = name.find("(")  # Deal with parenthesis
-    if index != -1:
-        name = name.replace(")", '')
+    if '(' in name:
+        index = name.find('(')  # Deal with parenthesis
+        name = name.replace(')', '')
         appendage = name[index+1 :]
         if appendage in junk:
             name = name[: index]
@@ -75,8 +75,7 @@ def get_alias(name, junk=config['junk']):
         if k in name:
             synonyms.append([k] + v.split(','))
             name = name.replace(k, '')
-    remainder = [[x] for x in name.split()]
-    synonyms = synonyms + remainder
+    synonyms.extend([x] for x in name.split())
     synonyms.sort(key=lambda x: origin_name.index(x[0]))
     possible_names = itertools.product(*synonyms)  # Tuple form name
     for tuple_form_name in possible_names:
@@ -90,7 +89,7 @@ class Excel(object):
     some informations about dropdown list, formula, width, format, re
     and derive."""
 
-    with pd.ExcelFile('background/template.xlsx') as xls:
+    with pd.ExcelFile('template.xlsx') as xls:
         tdf = pd.read_excel(xls, 'template', index_col=0)
         xls.sheet_names.remove('template')
         extra_data = pd.read_excel(xls, xls.sheet_names)
@@ -99,6 +98,7 @@ class Excel(object):
     formula = tdf.loc['formula':'formula']
     formula = formula.apply(lambda x: x.str.strip('[]'), axis=1)
     formula.rename({'formula': 'value'}, axis='index', inplace=True)
+    exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
     def __init__(self, filename, text):
         self.filename = filename
@@ -110,7 +110,7 @@ class Excel(object):
 
     def find_in_text(self, text):
         # Extracts value from text and assigns to self.data.
-        logging.info('file [%s]' % (self.filename))
+        logging.info('[%s]' % (self.filename))
         gmt = functools.partial(get_match, text)
         it = self._write_column()
         next(it)
@@ -121,13 +121,11 @@ class Excel(object):
                 m = gmt(name, pat)
             if m:
                 value = m.group(gp)
-                if pat == 'currency':
-                    value = config.get('currency', value, fallback=value)
+                value = config.get('currency', value, fallback=value)
                 it.send((name, value))
                 logging.info('%s - %s' % (name, reprlib.repr(value)))
             else:
                 logging.warning('%s not found' % (name))
-        logging.info('%s\n' % ('-'*40))
         it.close()
 
     def _write_column(self):
@@ -138,13 +136,12 @@ class Excel(object):
     def derive(self, name1, name2):
         # Gets name2 value in df by name1 and assigns to self.data.
         df = self.extra_data.get(name2, self.vdf)
-        column1 = exo(name1, df.columns)[0]
-        value = exo(self.data.at['value', name1], df[column1])[0]
+        column1 = self.exo(name1, df.columns)[0]
+        value = self.exo(self.data.at['value', name1], df[column1].dropna())[0]
         if name1 == name2:  # Converts value of name1
             self.data.at['value', name1] = value
         else:  # Gets name2 value
             subdf = df[df[column1] == value]
-            # Another column.
             column2 = df.drop([column1], axis=1).columns[0]
             self.data.at['value', name2] = subdf.iloc[0][column2]
 
@@ -160,8 +157,6 @@ class Excel(object):
             if self.vdf is not None:
                 self.vdf.to_excel(writer, 'DV', index=False)
                 dvsheet = writer.sheets['DV']
-                # How about format?
-                dvsheet.set_column('A:A', None, pct_fmt)
             for number, name in enumerate(self.tdf):
                 width = self.tdf.at['width', name]
                 fmt = locals().get(self.tdf.at['format', name])
@@ -171,35 +166,26 @@ class Excel(object):
                 # Data validation.
                 dv_box = self.tdf.at['dropdownlist', name]
                 if pd.notna(dv_box):
+                    dvsheet.set_column('{0}:{0}'.format(dv_box[0]), None, fmt)
                     dfsheet.data_validation(
                             cell,
                             {'validate': 'list', 'source': "='DV'!" + dv_box})
+        return filename
 
 
 def main():
-    # Creats a excel file from a pdf file and adds the excel to zipfile.
-    parser = ArgumentParser(
-            description="Copy the content from one to the other.")
-    parser.add_argument(
-            'input_dir', help="A directory containing the files to be read.")
-    parser.add_argument('zipfile', help="Name of the output file.")
-    args = parser.parse_args()
-    zip_file = zipfile.ZipFile(args.zipfile, mode='a')
-    for root, dirs, files in os.walk(args.input_dir):
-        fs = (f for f in files if detector.from_file(f).endswith('pdf'))
-        for file in fs:
-            filename = os.path.join(root, file)
-            text = tikaparse(filename)
-            xls = Excel(filename, text)
-            xls.export()
-            zip_file.write(filename)
-    zip_file.close()
+    # Creats some excel files according to a folder of pdf files.
+    # Shell copies zip to cwd such as tmp folder. Extratall files.
+    zip = os.path.basename(sys.argv[1])
+    with zipfile.ZipFile(zip, mode='a') as myzip:
+        for root, dirs, files in os.walk(os.getcwd()):
+            pdfs = (f for f in files if detector.from_file(f).endswith('pdf'))
+            for pdf in pdfs:
+                filename = os.path.join(root, pdf)
+                text = tikaparse(filename)
+                xls = Excel(filename, text)
+                xlsname = xls.export()
+                myzip.write(xlsname, os.path.relpath(xlsname))
 
 if __name__ == '__main__':
     main()
-
-
-def test2(file):
-    text = tikaparse(file)
-    xls = Excel(file, text)
-    xls.export()
