@@ -61,6 +61,7 @@ def main():
     pat = r'(?i)China|\bCo\b\.?|Company|Ltd\.?|Limited'
     cdf['Client Name'] = cdf['Client Name'].str.replace(pat, '###')
     idf = idf['Insurer Listing'][['Client Number', 'Insurer Name']]
+    idf.rename({'Client Number': 'Insurer Code'}, axis=1, inplace=True)
     if args.add_insurer_column:
         add_column_to_insurer()
     vdf = extract(vdf)

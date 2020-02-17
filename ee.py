@@ -18,7 +18,6 @@ from fuzzywuzzy import fuzz, process
 from xlsxwriter.utility import xl_rowcol_to_cell
 from tika import detector
 
-
 config = configparser.ConfigParser()
 config.read('config.ini')
 logging.basicConfig(filename='copa.log', filemode='w', level=logging.INFO)
@@ -34,14 +33,16 @@ ft_pat3 = re.compile(
 def tikaparse(file):
     # Returns text of file without footnote except at the beginning.
     parsed = tika.parser.from_file(file)
-    text = parsed['content']
-    text = text[: len(text)//2]  # Arbitrary
+    text = parsed['content'].lstrip('\n')
+    cut = text.find('\n\n\n ')
+    text = text[cut :]
+    for i in range(9):
+        cut = text.find('\n\n\n ', cut + 4)
+    text = text[: cut]
     m = ft_pat3.search(text)
     if m:
-        # Uses repr() to match a backslash.
         ft_pat = re.compile(
-                r'\n(\ndict://key[.][\dA-Z]+/[\da-z%]+)?'
-                + repr(m.group('f1'))[3 : -1]
+                repr(m.group('f1'))[1 : -1]  # deal with backslash
                 + r'0?[1-9]' + repr(m.group('f2'))[1 : -1])
         footnote = ft_pat.pattern.lower().replace(' policy', '\npolicy')
         text = footnote + ft_pat.sub('', text)
@@ -61,7 +62,7 @@ def get_alias(name, junk=config['junk']):
     # Yields name and other name from symonym dicts.
     if '(' in name:
         index = name.find('(')  # Deal with parenthesis
-        name = name.replace(')', '')
+        name = name.replace(')', '')  # Remove ')'
         appendage = name[index+1 :]
         if appendage in junk:
             name = name[: index]
@@ -95,18 +96,22 @@ class Excel(object):
         extra_data = pd.read_excel(xls, xls.sheet_names)
         vdf = extra_data.get('valid')
 
-    formula = tdf.loc['formula':'formula']
-    formula = formula.apply(lambda x: x.str.strip('[]'), axis=1)
-    formula.rename({'formula': 'value'}, axis='index', inplace=True)
     exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
     def __init__(self, filename, text):
         self.filename = filename
-        self.data = self.tdf['value':'value'].combine_first(self.formula)
+        self.data = self.tdf['value':'value'].applymap(self.mystrip)
         self.find_in_text(text)
         s_derive = self.tdf.loc['derive'].dropna()
         for index, value in s_derive.items():
             self.derive(value, index)
+
+    @staticmethod
+    def mystrip(value):
+        try:
+            return value.strip('[]')
+        except AttributeError:
+            return value
 
     def find_in_text(self, text):
         # Extracts value from text and assigns to self.data.
@@ -136,14 +141,17 @@ class Excel(object):
     def derive(self, name1, name2):
         # Gets name2 value in df by name1 and assigns to self.data.
         df = self.extra_data.get(name2, self.vdf)
-        column1 = self.exo(name1, df.columns)[0]
-        value = self.exo(self.data.at['value', name1], df[column1].dropna())[0]
+        for header in df.columns:
+            if header in name1 or name1 in header:
+                choice = df[header].dropna()
+                break
+        original_value = self.data.at['value', name1]
+        value = self.exo(original_value, choice)[0]
         if name1 == name2:  # Converts value of name1
             self.data.at['value', name1] = value
         else:  # Gets name2 value
-            subdf = df[df[column1] == value]
-            column2 = df.drop([column1], axis=1).columns[0]
-            self.data.at['value', name2] = subdf.iloc[0][column2]
+            subdf = df[df[header] == value]
+            self.data.at['value', name2] = subdf.iloc[0][name2]
 
     def export(self, filename=None):
         """Creats an excel in a temporary directory using self.data."""
@@ -179,7 +187,7 @@ def main():
     zip = os.path.basename(sys.argv[1])
     with zipfile.ZipFile(zip, mode='a') as myzip:
         for root, dirs, files in os.walk(os.getcwd()):
-            pdfs = (f for f in files if detector.from_file(f).endswith('pdf'))
+            pdfs = (f for f in files if f.endswith('pdf'))
             for pdf in pdfs:
                 filename = os.path.join(root, pdf)
                 text = tikaparse(filename)

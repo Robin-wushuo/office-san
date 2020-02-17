@@ -1,5 +1,5 @@
 There is a boring stuff about transforming informations from pdf to excel.
-Instead of doing manully, this repo gives an solution.
+Instead of doing manully, this repo gives a tool.
 Using an excel file as template, it searches the keywords in pdf files,
 then puts the result into a new excel file.
 There are some rules for the template:
