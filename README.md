@@ -6,7 +6,6 @@ There are some rules for the template:
 First row is about headers. First column is an index.
 Row 'value' is aoubt default value of each header.
 Row 'dropdownlist' is for data validation.
-Row 'formula' can be used to write formula into excel.
 Row 'width' and 'format' are about styling.
 Row 're' 'derive' are used by main python module to get right values. In
 order to make them work, we must have a config file, which contanin the

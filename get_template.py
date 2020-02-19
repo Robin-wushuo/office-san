@@ -53,6 +53,11 @@ def main():
     tdf.at[0, 'Premium VAT Rate'] = 0.06
     tdf.at[0, 'Commission Rate'] = 0.15
     tdf.at[0, 'Commission VAT Rate'] = 0.06
+    tdf.at[0, 'Premium (VAT Excluded)'] = '[=P2/(1+N2)]'
+    tdf.at[0, 'Premium VAT TAX'] = '[=P2-M2]'
+    tdf.at[0, 'Commission (VAT Excluded)'] = '[=U2/(1+S2)]'
+    tdf.at[0, 'Commission VAT TAX'] = '[=R2*S2]'
+    tdf.at[0, 'Commission Total Amount'] = '[=P2*Q2]'
     tdf.at[0, 'Income Class'] = '9.Renewal'
     tdf.at[0, 'Program Type'] = '3.Locally Admitted Policies'
     tdf.at[0, 'Placement Executive'] = 'No PE involved'
@@ -67,9 +72,9 @@ def main():
     vdf = extract(vdf)
     with pd.ExcelWriter('test/template.xlsx', engine='xlsxwriter') as writer:
         tdf.to_excel(writer, 'template', index=False)
-        cdf.to_excel(writer, 'client_code', index=False)
-        idf.to_excel(writer, 'insurer_code', index=False)
-        vdf.to_excel(writer, 'data_validation', index=False)
+        cdf.to_excel(writer, 'Client Code', index=False)
+        idf.to_excel(writer, 'Insurer Code', index=False)
+        vdf.to_excel(writer, 'valid', index=False)
         tdfsheet = writer.sheets['template']
         tdfsheet.set_column('B:B', 15)
         tdfsheet.set_column('C:D', 30)

@@ -3,6 +3,7 @@
 
 import configparser
 import functools
+import io
 import itertools
 import logging
 import os
@@ -30,9 +31,9 @@ ft_pat3 = re.compile(
         .+?(?P=f1)0?[1-9](?P=f2).+?(?P=f1)0?[1-9](?P=f2)""", re.S | re.X)
 
 
-def tikaparse(file):
-    # Returns text of file without footnote except at the beginning.
-    parsed = tika.parser.from_file(file)
+def parsepdf(binary_data):
+    # Returns text without footnote except at the beginning.
+    parsed = tika.parser.from_buffer(binary_data)
     text = parsed['content'].lstrip('\n')
     cut = text.find('\n\n\n ')
     text = text[cut :]
@@ -84,11 +85,7 @@ def get_alias(name, junk=config['junk']):
 
 
 class Excel(object):
-    """Produce some excel files based on a template.
-
-    In order to meet the team requirement, template excel contanining
-    some informations about dropdown list, formula, width, format, re
-    and derive."""
+    """Produce some excel files based on a template."""
 
     with pd.ExcelFile('template.xlsx') as xls:
         tdf = pd.read_excel(xls, 'template', index_col=0)
@@ -98,8 +95,7 @@ class Excel(object):
 
     exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
-    def __init__(self, filename, text):
-        self.filename = filename
+    def __init__(self, text):
         self.data = self.tdf['value':'value'].applymap(self.mystrip)
         self.find_in_text(text)
         s_derive = self.tdf.loc['derive'].dropna()
@@ -115,7 +111,6 @@ class Excel(object):
 
     def find_in_text(self, text):
         # Extracts value from text and assigns to self.data.
-        logging.info('[%s]' % (self.filename))
         gmt = functools.partial(get_match, text)
         it = self._write_column()
         next(it)
@@ -153,10 +148,10 @@ class Excel(object):
             subdf = df[df[header] == value]
             self.data.at['value', name2] = subdf.iloc[0][name2]
 
-    def export(self, filename=None):
+    def export(self):
         """Creats an excel in a temporary directory using self.data."""
-        filename = filename or self.filename.replace('.pdf', '.xlsx', 1)
-        with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+        bio = io.BytesIO()
+        with pd.ExcelWriter(bio, engine='xlsxwriter') as writer:
             workbook = writer.book
             num_fmt = workbook.add_format({'num_format': '#,##0.00'})
             pct_fmt = workbook.add_format({'num_format': '0%'})
@@ -178,22 +173,21 @@ class Excel(object):
                     dfsheet.data_validation(
                             cell,
                             {'validate': 'list', 'source': "='DV'!" + dv_box})
-        return filename
+        bio.seek(0)
+        return bio.read()
 
 
 def main():
-    # Creats some excel files according to a folder of pdf files.
-    # Shell copies zip to cwd such as tmp folder. Extratall files.
-    zip = os.path.basename(sys.argv[1])
+    zip = os.path.basename(sys.argv[1])  # Needs a .zip file in cwd
     with zipfile.ZipFile(zip, mode='a') as myzip:
-        for root, dirs, files in os.walk(os.getcwd()):
-            pdfs = (f for f in files if f.endswith('pdf'))
-            for pdf in pdfs:
-                filename = os.path.join(root, pdf)
-                text = tikaparse(filename)
-                xls = Excel(filename, text)
-                xlsname = xls.export()
-                myzip.write(xlsname, os.path.relpath(xlsname))
+        pdf_names = (x for x in myzip.namelist() if x.endswith('pdf'))
+        for pdf_name in pdf_names:
+            xls_name = pdf_name.replace('.pdf', '.xlsx')
+            text = parsepdf(myzip.read(pdf_name))
+            logging.info('[%s]' % (xls_name))
+            xls = Excel(text)
+            workbook = xls.export()
+            myzip.writestr(xls_name, workbook)
 
 if __name__ == '__main__':
     main()
