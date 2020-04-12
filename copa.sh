@@ -8,4 +8,4 @@ cp "$FILENAME" "$CWD"
 cp "template.xlsx" "$CWD"
 cp "config.ini" "$CWD"
 cd "$CWD"  # cwd changes from "~/copa/" to "/tmp/copa/"
-python ~/copa/ee.py "$FILENAME"  # Add excel files to the zip file copy
+python ~/copa/ee.py "$FILENAME"  # Add excel files to the zip file

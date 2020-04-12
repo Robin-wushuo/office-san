@@ -6,7 +6,6 @@ import functools
 import io
 import itertools
 import logging
-import os
 import os.path
 import re
 import reprlib
@@ -17,7 +16,6 @@ import pandas as pd
 import tika.parser
 from fuzzywuzzy import fuzz, process
 from xlsxwriter.utility import xl_rowcol_to_cell
-from tika import detector
 
 config = configparser.ConfigParser()
 config.read('config.ini')
@@ -31,9 +29,9 @@ ft_pat3 = re.compile(
         .+?(?P=f1)0?[1-9](?P=f2).+?(?P=f1)0?[1-9](?P=f2)""", re.S | re.X)
 
 
-def parsepdf(binary_data):
-    # Returns text without footnote except at the beginning.
-    parsed = tika.parser.from_buffer(binary_data)
+# Returns text without footnote except at the beginning.
+def parse(buffer, target):
+    parsed = tika.parser.from_buffer(buffer)
     text = parsed['content'].lstrip('\n')
     cut = text.find('\n\n\n ')
     text = text[cut :]
@@ -47,20 +45,43 @@ def parsepdf(binary_data):
                 + r'0?[1-9]' + repr(m.group('f2'))[1 : -1])
         footnote = ft_pat.pattern.lower().replace(' policy', '\npolicy')
         text = footnote + ft_pat.sub('', text)
-    return text
+    target.send(text)
+    target.close()
 
 
-def get_match(text, name, pattern):
-    pat_v = config['pattern'][pattern]
-    for alias in get_alias(name):  # Includes all names
-        pat = pat_v.replace('{h}', r'\s*'.join(alias.split()), 1)
-        m = re.search(pat, text)
-        if m:
-            return m
+def coroutine(func):
+    def start(*args, **kwargs):
+        cr = func(*args, **kwargs)
+        next(cr)
+        return cr
+    return start
 
 
+@coroutine
+def grep(pattern_dict, target):
+    text = yield
+    for k, v in pattern_dict.items():
+        pattern_name, group, relation = v.split(':')
+        if pattern_name != 'last':
+            halfp = config['pattern'][pattern_name]
+            for alias in get_alias(k):  # Includes all names
+                wholep = halfp.replace('{h}', r'\s*'.join(alias.split()), 1)
+                m = re.search(wholep, text)
+                if m:
+                    break
+            else:
+                logging.warning('%s not found' % (k))
+                continue
+        value = m.group(group)
+        value = config.get('currency', value, fallback=value)
+        logging.info('%s - %s' % (k, reprlib.repr(value)))
+        target.send((k, value, relation))
+    target.close()
+    yield
+
+
+# Yields name and other name from symonym dicts.
 def get_alias(name, junk=config['junk']):
-    # Yields name and other name from symonym dicts.
     if '(' in name:
         index = name.find('(')  # Deal with parenthesis
         name = name.replace(')', '')  # Remove ')'
@@ -95,12 +116,10 @@ class Excel(object):
 
     exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
-    def __init__(self, text):
+    def __init__(self, buffer):
         self.data = self.tdf['value':'value'].applymap(self.mystrip)
-        self.find_in_text(text)
-        s_derive = self.tdf.loc['derive'].dropna()
-        for index, value in s_derive.items():
-            self.derive(value, index)
+        s_re = self.tdf.loc['re'].dropna()
+        parse(buffer, grep(s_re, self.derive()))
 
     @staticmethod
     def mystrip(value):
@@ -109,44 +128,25 @@ class Excel(object):
         except AttributeError:
             return value
 
-    def find_in_text(self, text):
-        # Extracts value from text and assigns to self.data.
-        gmt = functools.partial(get_match, text)
-        it = self._write_column()
-        next(it)
-        s_re = self.tdf.loc['re'].dropna()
-        for name, pat_gp in s_re.items():
-            pat, gp = pat_gp.split()
-            if pat != 'last':
-                m = gmt(name, pat)
-            if m:
-                value = m.group(gp)
-                value = config.get('currency', value, fallback=value)
-                it.send((name, value))
-                logging.info('%s - %s' % (name, reprlib.repr(value)))
-            else:
-                logging.warning('%s not found' % (name))
-        it.close()
-
-    def _write_column(self):
-        while 1:
-            column, value = yield  # Push
-            self.data.at['value', column] = value.replace('\n', '')
-
-    def derive(self, name1, name2):
-        # Gets name2 value in df by name1 and assigns to self.data.
-        df = self.extra_data.get(name2, self.vdf)
-        for header in df.columns:
-            if header in name1 or name1 in header:
-                choice = df[header].dropna()
-                break
-        original_value = self.data.at['value', name1]
-        value = self.exo(original_value, choice)[0]
-        if name1 == name2:  # Converts value of name1
-            self.data.at['value', name1] = value
-        else:  # Gets name2 value
-            subdf = df[df[header] == value]
-            self.data.at['value', name2] = subdf.iloc[0][name2]
+    # Gets relation value in df by column and assigns to self.data.
+    @coroutine
+    def derive(self):
+        while True:
+            column, col_value, relation = yield
+            col_value = col_value.replace('\n', '')
+            self.data.at['value', column] = col_value
+            if relation:  # Derives from relationship
+                df = self.extra_data.get(relation, self.vdf)
+                for header in df.columns:
+                    if header in column or column in header:
+                        choice = df[header].dropna()
+                        break
+                rel_value = self.exo(col_value, choice)[0]
+                if column == relation:  # Converts value of column
+                    self.data.at['value', column] = rel_value
+                else:  # Gets relation value
+                    subdf = df[df[header] == rel_value]
+                    self.data.at['value', relation] = subdf.iloc[0][relation]
 
     def export(self):
         """Creats an excel in a temporary directory using self.data."""
@@ -183,9 +183,8 @@ def main():
         pdf_names = (x for x in myzip.namelist() if x.endswith('pdf'))
         for pdf_name in pdf_names:
             xls_name = pdf_name.replace('.pdf', '.xlsx')
-            text = parsepdf(myzip.read(pdf_name))
             logging.info('[%s]' % (xls_name))
-            xls = Excel(text)
+            xls = Excel(myzip.read(pdf_name))
             workbook = xls.export()
             myzip.writestr(xls_name, workbook)
 
