@@ -1,6 +1,7 @@
 # This is a script, so it needs a script docstring.
 """Usage: see the argparse module in python standard library."""
 
+import concurrent.futures
 import configparser
 import functools
 import io
@@ -8,8 +9,8 @@ import itertools
 import logging
 import os.path
 import re
-import reprlib
 import sys
+import time
 import zipfile
 
 import pandas as pd
@@ -17,6 +18,7 @@ import tika.parser
 from fuzzywuzzy import fuzz, process
 from xlsxwriter.utility import xl_rowcol_to_cell
 
+pool = concurrent.futures.ProcessPoolExecutor()
 config = configparser.ConfigParser()
 config.read('config.ini')
 logging.basicConfig(filename='copa.log', filemode='w', level=logging.INFO)
@@ -30,14 +32,16 @@ ft_pat3 = re.compile(
 
 
 # Returns text without footnote except at the beginning.
-def parse(buffer, target):
+def parse(buffer):
     parsed = tika.parser.from_buffer(buffer)
     text = parsed['content'].lstrip('\n')
+    # Keeping first 9 pages.
     cut = text.find('\n\n\n ')
     text = text[cut :]
     for i in range(9):
         cut = text.find('\n\n\n ', cut + 4)
     text = text[: cut]
+    # Removes footnotes.
     m = ft_pat3.search(text)
     if m:
         ft_pat = re.compile(
@@ -45,39 +49,7 @@ def parse(buffer, target):
                 + r'0?[1-9]' + repr(m.group('f2'))[1 : -1])
         footnote = ft_pat.pattern.lower().replace(' policy', '\npolicy')
         text = footnote + ft_pat.sub('', text)
-    target.send(text)
-    target.close()
-
-
-def coroutine(func):
-    def start(*args, **kwargs):
-        cr = func(*args, **kwargs)
-        next(cr)
-        return cr
-    return start
-
-
-@coroutine
-def grep(pattern_dict, target):
-    text = yield
-    for k, v in pattern_dict.items():
-        pattern_name, group, relation = v.split(':')
-        if pattern_name != 'last':
-            halfp = config['pattern'][pattern_name]
-            for alias in get_alias(k):  # Includes all names
-                wholep = halfp.replace('{h}', r'\s*'.join(alias.split()), 1)
-                m = re.search(wholep, text)
-                if m:
-                    break
-            else:
-                logging.warning('%s not found' % (k))
-                continue
-        value = m.group(group)
-        value = config.get('currency', value, fallback=value)
-        logging.info('%s - %s' % (k, reprlib.repr(value)))
-        target.send((k, value, relation))
-    target.close()
-    yield
+    return text
 
 
 # Yields name and other name from symonym dicts.
@@ -105,6 +77,25 @@ def get_alias(name, junk=config['junk']):
         yield ' '.join(tuple_form_name)
 
 
+class Task(concurrent.futures.Future):
+    """A wrapper of cpu bound generator for future."""
+
+    def __init__(self, gen):
+        super().__init__()
+        self._gen = gen
+
+    def step(self, value=None):
+        try:
+            f = self._gen.send(value)
+            f.add_done_callback(self._wakeup)
+        except StopIteration as exc:
+            self.set_result(exc.value)
+
+    def _wakeup(self, f):
+        result = f.result()
+        self.step(result)
+
+
 class Excel(object):
     """Produce some excel files based on a template."""
 
@@ -117,10 +108,10 @@ class Excel(object):
     exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
 
     def __init__(self, buffer):
+        self.text = parse(buffer)
         self.data = self.tdf['value':'value'].applymap(self.mystrip)
-        s_re = self.tdf.loc['re'].dropna()
-        parse(buffer, grep(s_re, self.derive()))
 
+    # Extracts excel formula by dataframe.
     @staticmethod
     def mystrip(value):
         try:
@@ -128,28 +119,61 @@ class Excel(object):
         except AttributeError:
             return value
 
+    def transform_currency(self, value):
+        value = config.get('currency', value, fallback=value)
+        return value.replace('\n', '')
+
+    def search(self, pattern, groups, columns):
+        m = re.search(pattern, self.text)
+        if m:
+            origin_value = self.transform_currency(m.group(groups[0]))
+            origin_column = columns[0]
+            for g, c in itertools.zip_longest(groups, columns):
+                try:
+                    value = self.transform_currency(m.group(g))
+                    self.data.at['value', c] = value
+                except IndexError:
+                    self.derive(origin_column, origin_value, c)
+            data = self.data.loc[:, self.data.columns.isin(columns)]
+            return data
+
+    def search_column(self, column, patinfo):
+        pattern_name, groupinfo, relation = patinfo.split(':')
+        groups = groupinfo.split(',')
+        columns = (column + ',' + relation).rstrip(',').split(',')
+        hp = config['pattern'][pattern_name]
+        for alias in get_alias(column):
+            wp = hp.replace('{h}', r'\s*'.join(alias.split()), 1)
+            result = yield pool.submit(self.search, wp, groups, columns)
+            if result is not None:
+                return result
+        else:
+            logging.warning('Value of %s not found.' % (column))
+
     # Gets relation value in df by column and assigns to self.data.
-    @coroutine
-    def derive(self):
-        while True:
-            column, col_value, relation = yield
-            col_value = col_value.replace('\n', '')
-            self.data.at['value', column] = col_value
-            if relation:  # Derives from relationship
-                df = self.extra_data.get(relation, self.vdf)
-                for header in df.columns:
-                    if header in column or column in header:
-                        choice = df[header].dropna()
-                        break
-                rel_value = self.exo(col_value, choice)[0]
-                if column == relation:  # Converts value of column
-                    self.data.at['value', column] = rel_value
-                else:  # Gets relation value
-                    subdf = df[df[header] == rel_value]
-                    self.data.at['value', relation] = subdf.iloc[0][relation]
+    def derive(self, origin_column, origin_value, target_column):
+        df = self.extra_data.get(target_column, self.vdf)
+        for header in df.columns:
+            if header in origin_column or origin_column in header:
+                choice = df[header].dropna()
+                break
+        alternative = self.exo(origin_value, choice)[0]
+        if target_column == origin_column:  # Converts value
+            self.data.at['value', origin_column] = alternative
+        else:  # Gets matching value
+            subdf = df[df[header] == alternative]
+            self.data.at['value', target_column] = subdf.iloc[0][target_column]
 
     def export(self):
         """Creats an excel in a temporary directory using self.data."""
+        s_re = self.tdf.loc['re'].dropna()
+        tasks = []
+        for index, value in s_re.items():
+            t = Task(self.search_column(index, value))
+            t.step()
+            tasks.append(t)
+        for t in concurrent.futures.as_completed(tasks):
+            self.data.update(t.result())
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine='xlsxwriter') as writer:
             workbook = writer.book
@@ -178,15 +202,16 @@ class Excel(object):
 
 
 def main():
-    zip = os.path.basename(sys.argv[1])  # Needs a .zip file in cwd
+    zip = os.path.basename(sys.argv[1])
     with zipfile.ZipFile(zip, mode='a') as myzip:
         pdf_names = (x for x in myzip.namelist() if x.endswith('pdf'))
-        for pdf_name in pdf_names:
-            xls_name = pdf_name.replace('.pdf', '.xlsx')
+        for pdf in pdf_names:
+            xls_name = pdf.replace('.pdf', '.xlsx')
             logging.info('[%s]' % (xls_name))
-            xls = Excel(myzip.read(pdf_name))
+            xls = Excel(myzip.read(pdf))
             workbook = xls.export()
             myzip.writestr(xls_name, workbook)
+
 
 if __name__ == '__main__':
     main()

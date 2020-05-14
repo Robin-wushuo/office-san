@@ -11,6 +11,9 @@ Row 're' 'derive' are used by main python module to get right values. In
 order to make them work, we must have a config file, which contanin the
 parameters of the names.
 
+Method derive needs target_column name to be the same in both worksheets.
+
+
 Usage:
 Extract a zip file into current working directory. We need template.xlsx
 and config.ini two files in addition.
@@ -23,4 +26,4 @@ Make sure tika server is tika-server-1.19, text is parsed by tika.
 
 This is my first script, I am glad to recieve your help and question.
 We might communicate by email although my response maybe slow.
-My emmail: wushuowow@gmail.com
+My email: wushuowow@gmail.com
