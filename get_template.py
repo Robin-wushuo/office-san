@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
-import argparse
 import pandas as pd
-
 from xlsxwriter.utility import xl_cell_to_rowcol
+
+template_name = 'background/Billing of Witzenmann.xlsx'
 
 source = (
         'A7:A15', 'A19:A21', 'A42:A44', 'B2:B11', 'C2:C13', 'D63:D84',
@@ -26,21 +26,8 @@ def extract(df, ranges=source):
     return result.reindex_like(df)
 
 
-def add_column_to_insurer():
-    """Adds a column containing no comma in name."""
-    names = idf['Insurer Name']
-    index = names.index
-    l = []
-    for name in names:
-        name_list = name.replace(',', ' ').lower().split()
-        name = ' '.join(name_list)
-        l.append(name)
-    series = pd.Series(l, index=index)
-    idf['Insurer Name (drop comma)'] = series
-
-
 def main():
-    with pd.ExcelFile('background/Billing of Witzenmann.xlsx') as xls:
+    with pd.ExcelFile(template_name) as xls:
         tdf = pd.read_excel(
                 xls, sheet_name='01 Multi-line policy Details')
         cdf = pd.read_excel(xls, sheet_name='client code')
@@ -63,13 +50,21 @@ def main():
     tdf.at[0, 'Placement Executive'] = 'No PE involved'
     tdf.at[0, 'Distribution Channel'] = '1. Open Market(Non Facility)'
     cdf = cdf.dropna(how='all')
-    pat = r'(?i)China|\bCo\b\.?|Company|Ltd\.?|Limited'
-    cdf['Client Name'] = cdf['Client Name'].str.replace(pat, '###')
+    from configparser import ConfigParser
+    config = ConfigParser()
+    config.read('config.ini')
+    # client_pat = r'(?i)China|\bCo\b\.?|Company|Ltd\.?|Limited'
+    # cdf['Client Name'] = cdf['Client Name'].str.replace(client_pat, '###')
     idf = idf['Insurer Listing'][['Client Number', 'Insurer Name']]
-    idf.rename({'Client Number': 'Insurer Code'}, axis=1, inplace=True)
-    if args.add_insurer_column:
-        add_column_to_insurer()
+    for key, pattern in config['standard'].items():
+        idf['Insurer Name'] = idf['Insurer Name'].str.replace(pattern, ' ')
+        cdf['Client Name'] = cdf['Client Name'].str.replace(pattern, ' ')
+    cdf.rename({'Client Name': 'Client Name (Full Name)'}, axis=1, inplace=True)
+    idf.rename({
+        'Client Number': 'Insurer Code',
+        'Insurer Name': 'Insurer Name (Full Name)'}, axis=1, inplace=True)
     vdf = extract(vdf)
+    vdf.rename({'Risk Name1': 'Risk'}, axis=1, inplace=True)
     with pd.ExcelWriter('test/template.xlsx', engine='xlsxwriter') as writer:
         tdf.to_excel(writer, 'template', index=False)
         cdf.to_excel(writer, 'Client Code', index=False)
@@ -83,11 +78,19 @@ def main():
         tdfsheet.set_column('G:Y', 25)
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-        '-a', '--add_insurer_column', help="add column to insurer",
-        action="store_true")
-args = parser.parse_args()
+import pandas as pd
+sheet_names = ['Client Code', 'Insurer Code', 'valid']
 
-if __name__ == '__main__':
-    main()
+
+def get_dataframe(filename):
+    with pd.ExcelFile(filename) as xls:
+        for sheet_name in sheet_names:
+            dataframe = pd.read_excel(xls, sheet_name=sheet_name)
+            yield dataframe
+
+
+def compare_template():
+    old = get_dataframe('test/oldtemplate.xlsx')
+    new = get_dataframe('test/template.xlsx')
+    for old_data, new_data, name in zip(old, new, sheet_names):
+        print('%s equal: %s' % (name, old_data.equals(new_data)))

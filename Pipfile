@@ -12,6 +12,7 @@ xlsxwriter = "*"
 xlrd = "*"
 fuzzywuzzy = {extras = ["speedup"],version = "*"}
 python-levenshtein = "*"
+pytesseract = "*"
 
 [requires]
 python_version = "3.7"

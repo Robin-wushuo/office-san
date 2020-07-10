@@ -2,9 +2,8 @@
 """Usage: see the argparse module in python standard library."""
 
 from collections import namedtuple
-import concurrent.futures
 import configparser
-import functools
+import concurrent.futures
 import io
 import itertools
 import re
@@ -12,7 +11,8 @@ import zipfile
 
 import pandas as pd
 from tika.parser import from_buffer as tika_parse
-from fuzzywuzzy import fuzz, process
+from fuzzywuzzy import fuzz
+from fuzzywuzzy.process import extractOne
 from xlsxwriter.utility import xl_rowcol_to_cell
 
 config = configparser.ConfigParser()
@@ -22,20 +22,15 @@ ready_list = []
 future_queue = {}
 p_pool = concurrent.futures.ProcessPoolExecutor()
 t_pool = concurrent.futures.ThreadPoolExecutor()
-Match = namedtuple('Match', 'column, pattern_name, groups, columns')
-exo = functools.partial(process.extractOne, scorer=fuzz.ratio)
+Match = namedtuple('Match', 'column, pattern_name, groups, columns, filename',
+                  defaults=[None])
 
-text_with_footnote_pat = re.compile(
-        r"""(?P<f1>(\n){4}([^\n]+\n\n[^\n]*){,4})
-        0?[1-9]  # Page number which is less than 9
-        (?P<f2>([^\n]+\n\n(?!\n)){,4})
-        .+?(?P=f1)0?[1-9](?P=f2).+?(?P=f1)0?[1-9](?P=f2)""", re.S | re.X)
-
-with pd.ExcelFile('template.xlsx') as xls:
+with pd.ExcelFile('test/template.xlsx') as xls:
     template = pd.read_excel(xls, 'template', index_col=0)
     xls.sheet_names.remove('template')
     extra_data = pd.read_excel(xls, xls.sheet_names)
     data_validation = extra_data.get('valid')
+    row_match = template.loc['Match_info'].dropna()
 
 
 def schedule(g):
@@ -120,23 +115,29 @@ def _cut(text, pages, page_break='\n\n\n '):
 
 
 def _remove_footnote(text):
-    m = text_with_footnote_pat.search(text)
+    m = re.search(config['noheader_pattern']['text_with_footnote'], text)
     if m:
         footnote_pat = re.compile(
                 repr(m.group('f1'))[1:-1]
-                + r'0?[1-9]' + repr(m.group('f2'))[1:-1])
+                + r'\d?\d ' + repr(m.group('f2'))[1:-1])
         # Keeps policy which is inside the footnote.
         policy = footnote_pat.pattern.lower().replace(' policy', '\npolicy')
         text = policy + footnote_pat.sub('', text)
     return text
 
 
-def parse(pdf_data, cut_page=True):
-    parsed = yield from async_func(t_pool, tika_parse, pdf_data)
-    text = parsed['content'].lstrip('\n')
+def parse(pdf_file, cut_page=True):
+    byte_string = yield from read(pdf_file)
+    parsed = yield from async_func(t_pool, tika_parse, byte_string)
+    text = parsed['content']
+    if text:
+        text = text.lstrip('\n')
+    else:
+        print('\nFailed: %s is scanned pdf.' % pdf_file.name)
+        return ''
     if cut_page:
         text = _cut(text, pages=9)
-    text = _remove_footnote(text)
+    text = yield from async_func(p_pool, _remove_footnote, text)
     return text
 
 
@@ -147,7 +148,6 @@ def read(file):
 
 
 def get_alias(name):
-    # Produce alternative name.
     name_parts = name.partition('(')  # )
     name = name_parts[0].strip().lower()
     if name in config['name_synonym']:
@@ -164,11 +164,15 @@ def get_alias(name):
         yield ' '.join(tuple_form_name)
 
 
-def get_pattern(name, column):
-    general = config['pattern'][name]
+def get_pattern(pattern_name, column):
+    general = config['pattern'][pattern_name]
+    headers = []
     for h in get_alias(column):
-        pattern = general.replace('{h}', r'\s*'.join(h.split()), 1)
-        yield pattern
+        h = r'\s*'.join(h.split())
+        headers.append(h)
+    head_pattern = '(%s)' % '|'.join(headers)
+    pattern = general.replace('{h}', head_pattern, 1)
+    return pattern
 
 
 def handle(mapping):
@@ -186,36 +190,57 @@ def _get_function(value):
         return value
 
 
-def fetch(info, text, dataframe):
-    for p in get_pattern(info.pattern_name, info.column):
-        # Find value from text by re.
-        m = re.search(p, text)
-        if m:
-            for g, c in itertools.zip_longest(info.groups, info.columns):
-                try:
-                    value = m.group(g)
-                except IndexError:
-                    # Find value from dataframe by fuzzywuzzy.
-                    source = extra_data.get(c, data_validation)
-                    choice = source[info.column]
-                    first_value = m.group(info.groups[0])
-                    matched_value = exo(first_value, choice.dropna())[0]
-                    if c == info.column:
-                        dataframe.at['value', c] = matched_value
-                    else:
-                        selection = source[choice == matched_value]
-                        dataframe.at['value', c] = selection.iloc[0][c]
+def fetch(info, text, dataframe, header=True):
+    if header:
+        pattern = get_pattern(info.pattern_name, info.column)
+    else:
+        try:
+            pattern = config['noheader_pattern'][info.pattern_name]
+        except KeyError:
+            return dataframe
+    # Find value from text by re.
+    m = re.search(pattern, text)
+    if m:
+        for g, c in itertools.zip_longest(info.groups, info.columns):
+            try:
+                value = m.group(g)
+            except IndexError:
+                # Find value from dataframe by fuzzywuzzy.
+                source = extra_data.get(c, data_validation)
+                choices = source[info.column]
+                first_group = m.group(info.groups[0])
+                best_match = standard_match(first_group, choices.dropna())
+                matched_value, ratio, _ = best_match
+                if ratio < 80:
+                    print('Match(%s)\nResult%s' % (first_group, best_match))
+                    print('Location(%s in %s)' % (info.column, info.filename))
+                if c == info.column:
+                    dataframe.at['value', c] = matched_value
                 else:
-                    dataframe.at['value', c] = standard(value)
-            dataframe = dataframe.loc[:, dataframe.columns.isin(info.columns)]
-            break
+                    selection = source[choices == matched_value]
+                    dataframe.at['value', c] = selection.iloc[0][c]
+            else:
+                dataframe.at['value', c] = adjust(value)
+    elif header:
+        fetch(info, text, dataframe, header=False)
     return dataframe
 
 
-def standard(value):
+def adjust(value):
     value = config.get('currency', value, fallback=value)
     value = value.replace('\n', '')
     return value
+
+
+def standard(value):
+    for key, pattern in config['standard'].items():
+        value = re.sub(pattern, ' ', value)
+    return value
+
+
+def standard_match(value, choices):
+    match = extractOne(standard(value), choices, scorer=fuzz.ratio)
+    return match
 
 
 def format_then_to_excel(bio, dataframe):
@@ -254,11 +279,10 @@ class Crawler(object):
         self.data = {}
 
     def crawl(self):
-        for file in self.zip.namelist():
-            if file.endswith('pdf'):
-                pdf = self.zip.open(file)
+        for filename in self.zip.namelist():
+            if filename.endswith('pdf'):
+                pdf = self.zip.open(filename)
                 self.pdf_files.append(pdf)
-        self.materials = template.loc['re'].dropna()
         for _ in range(self.max_worker):
             schedule(self.work())
         run()
@@ -266,21 +290,26 @@ class Crawler(object):
             bio = io.BytesIO()
             format_then_to_excel(bio, dataframe)
             bio.seek(0)
-            self.zip.writestr(name.replace('.pdf', '.xlsx'), bio.read())
+            with open(name.replace('.pdf', '.xlsx'), mode='wb') as file:
+                file.write(bio.read())
+            # self.zip.writestr(name.replace('.pdf', '.xlsx'), bio.read())
         self.zip.close()
 
     def work(self):
         while self.pdf_files:
-            pdf = self.pdf_files.pop(0)
-            byte_string = yield from read(pdf)
-            text = yield from parse(byte_string)
+            file = self.pdf_files.pop(0)
+            text = yield from parse(file)
+            if not text:
+                continue
             dataframe = template['value':'value'].applymap(_get_function)
-            self.data[pdf.name] = dataframe
-            for match_info in handle(self.materials):
-                schedule(self.update(dataframe, text, match_info, pdf.name))
+            self.data[file.name] = dataframe
+            for match_info in handle(row_match):
+                match_info = match_info._replace(filename=file.name)
+                schedule(self.update(dataframe, text, match_info))
 
-    def update(self, dataframe, text, info, filename):
+    def update(self, dataframe, text, info):
         df = yield from async_func(p_pool, fetch, info, text, dataframe)
-        if df is dataframe:
-            print('%s not found in %s.' % (info.column, filename))
+        if dataframe.equals(df):
+            print('Warning: %s not found in %s.' % (info.column, info.filename))
+        df = df.loc[:, df.columns.isin(info.columns)]
         dataframe.update(df)
