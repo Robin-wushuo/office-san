@@ -4,6 +4,7 @@ url = "https://pypi.org/simple"
 verify_ssl = true
 
 [dev-packages]
+noteshrink = {editable = true,git = "https://github.com/mzucker/noteshrink"}
 
 [packages]
 tika = "*"
@@ -13,6 +14,7 @@ xlrd = "*"
 fuzzywuzzy = {extras = ["speedup"],version = "*"}
 python-levenshtein = "*"
 pytesseract = "*"
+opencv-python-headless = "*"
 
 [requires]
 python_version = "3.7"
