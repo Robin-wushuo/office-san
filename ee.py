@@ -30,10 +30,9 @@ ready_list = []
 future_queue = {}
 p_pool = concurrent.futures.ProcessPoolExecutor()
 t_pool = concurrent.futures.ThreadPoolExecutor()
-Match = namedtuple('Match', 'column, pattern_name, groups, columns, filename',
-                  defaults=[None])
+Match = namedtuple('Match', 'columns, groups, filename', defaults=[None])
 
-with pd.ExcelFile('test/template.xlsx') as xls:
+with pd.ExcelFile('template.xlsx') as xls:
     template = pd.read_excel(xls, 'template', index_col=0)
     xls.sheet_names.remove('template')
     extra_data = pd.read_excel(xls, xls.sheet_names)
@@ -242,11 +241,11 @@ def has_close_value(num_list):
     return _isclose
 
 
-def get_alias(name):
+def alias(name):
     name_parts = name.partition('(')  # )
     name = name_parts[0].strip().lower()
     if name in config['name_synonym']:
-        yield from (x for x in config['name_synonym'][name].split(','))
+        yield from (x.strip() for x in config['name_synonym'][name].split(','))
     origin_name, synonyms = name, []
     for k, v in config['word_synonym'].items():
         if k in name:
@@ -256,26 +255,36 @@ def get_alias(name):
     synonyms.sort(key=lambda x: origin_name.index(x[0]))
     possible_names = itertools.product(*synonyms)  # Tuple form name
     for tuple_form_name in possible_names:
-        yield ' '.join(tuple_form_name)
+        yield ' '.join(tuple_form_name).strip()
 
 
-def get_pattern(pattern_name, column):
-    general = config['pattern'][pattern_name]
-    headers = []
-    for h in get_alias(column):
-        h = r'\s*'.join(h.split())
-        headers.append(h)
-    head_pattern = '(%s)' % '|'.join(headers)
-    pattern = general.replace('{h}', head_pattern, 1)
-    return pattern
+# def collect_alias(pattern_name, column):
+#     general = config['pattern'][pattern_name]
+#     headers = []
+#     for h in alias(column):
+#         h = r'\s*'.join(h.split())
+#         headers.append(h)
+#     head_pattern = '(%s)' % '|'.join(headers)
+#     pattern = general.replace('{h}', head_pattern, 1)
+#     return pattern
+
+def collect_alias(column_name):
+    headers = [x.replace(' ', '[ \n]+') for x in alias(column_name)]
+    head_pattern = '|'.join(headers)
+    return head_pattern
 
 
-def handle(mapping):
-    for k, v in mapping.items():
-        pattern_name, groups, columns = v.split(':')
-        groups = groups.split(',')
-        columns = (k + ',' + columns).rstrip(',').split(',')
-        yield Match(k, pattern_name, groups, columns)
+
+
+
+
+def get_subgroup_name(name):
+    try:
+        result = config['group_user'][name]
+    except AttributeError:
+        result = name
+    return result
+
 
 
 def _get_function(value):
@@ -287,7 +296,7 @@ def _get_function(value):
 
 def fetch(info, text, dataframe, header=True):
     if header:
-        pattern = get_pattern(info.pattern_name, info.column)
+        pattern = collect_alias(info.pattern_name, info.column)
     else:
         try:
             pattern = config['noheader_pattern'][info.pattern_name]
@@ -431,9 +440,67 @@ class Crawler(object):
         return data
 
 
-def test():
-    c = Crawler('my.zip')
-    c.crawl()
+with pd.ExcelFile('re_patterns.xlsx') as xls:
+    search_info = pd.read_excel(xls, 'for_search', index_col=0)
+
+# Extract names of match groups.
+group_users = search_info.loc[
+        ['group_user', 'group'], search_info.loc['group_user'].notna()]
+
+# Collect keywords which include aliases of all column names.
+keyword_pattern = '|'.join(config['column_name_pattern'].values())
+# TODO: Add positive lookbehind assertion.
+template_pattern = (
+        r'{column}\s*(\s+\w+\s+)??\s*[:：]?\s*(?P<_content>{content})')
+
+# TODO: Let fetch work as before.
+# TODO: Change logic: Look for two columns in page.
+# TODO: Add a function to check match result.
+def fetch(text, keyword_pattern=keyword_pattern, pattern=template_pattern):
+    # Search keywords.
+    # TODO: Handle the simplest case.
+    keyword_reo = re.compile(keyword_pattern, re.IGNORECASE)
+    keyword_mo = keyword_reo.search(text)
+    # Try to match the content.
+    if keyword_mo:
+        # Get column name.
+        group_name = keyword_mo.lastgroup
+        column_number = int(group_name.strip('column'))
+        column_name = search_info.columns[column_number]
+        # TODO: pdb new implement. Check patterns in config.ini .
+        # TODO: fetch text[2317:].
+        name_pat = config['column_name_pattern'][column_name]
+        content_pat = config['content_pattern'][column_name]
+        column_pattern = pattern.format(column=name_pat, content=content_pat)
+        column_mo = re.match(column_pattern, text[keyword_mo.start():])
+        if column_mo:  # Recursive function: Base case.
+            # TODO: Why does content not match?
+            # TODO: Remove the found keywords.
+            # Maybe content is a group of the result.
+            try:
+                user = group_users[column_name].str.split(',', expand=True)
+            except KeyError:
+                search_info.at['value', name] = column_mo.group('_content')
+            else:
+                for number in user:
+                    group = user.loc['group', number]
+                    column_name = user.loc['group_user', number]
+                    search_info.at['value', column_name] = column_mo.group(
+                            group)
+            return search_info.loc['value']
+        else:  # Recursive case.
+            text = text[keyword_mo.end():]
+            fetch(text)
+    else:
+        return None
+
+import tika.parser
+def test(filename='Wit.pdf'):
+    dataframe = template['value':'value'].applymap(_get_function)
+    parsed = tika.parser.from_file(filename)
+    text = parsed['content']
+    text = _cut(text, pages=9)
+    value_s = fetch(text)
 
 if __name__ == '__main__':
     test()
