@@ -1,6 +1,7 @@
 import configparser
 import itertools
 import pandas as pd
+import re
 
 
 with pd.ExcelFile('template.xlsx') as xls:
@@ -18,7 +19,7 @@ def get_alias(name):
     origin_name, synonyms = name, []
     for k, v in config['word_synonym'].items():
         if k in name:
-            synonyms.append([k] + v.split(','))
+            synonyms.append([k] + [x.strip() for x in v.split(',')])
             name = name.replace(k, '')
     synonyms.extend([x] for x in name.split())
     synonyms.sort(key=lambda x: origin_name.index(x[0]))
@@ -27,55 +28,40 @@ def get_alias(name):
         yield ' '.join(tuple_form_name).strip()
 
 
-def get_group(names):
-    try:
-        name_list = names.split(',')
-    except AttributeError:
-        return names
+def get_column_name(name):
+    mo = re.search(r'(\d+)\w?$', name)
+    if mo:
+        number = int(mo.group(1))
+        name = template.columns[number]
+        return name.lower()
     else:
-        # x must be in config.ini .
-        group_iterator = map(lambda x: config['group_user'][x], name_list)
-        group = ','.join(group_iterator)
-        return group
+        number = tuple(template.columns).index(name)
+        return number
 
 
-def collect_from_template():
-    for_search = template.loc[
-            ['search', 'group_user'], template.loc['search'].notna()]
-    # Add new rows.
-    group_user = for_search.loc['group_user']
-    group = group_user.apply(get_group)
-    for_search.loc['group'] = group
-    for_search.loc['value'] = ''
-    return for_search
+def produce_keyword_pattern(name):
+    # Use free variable 'for_search'.
+    general_pattern = '(?P<{id}>{content})'
+    column_number = get_column_name(name)
+    id = 'column{}'.format(column_number)
+    patterns = (x.replace(' ', r'[ \n]+') for x in get_alias(name))
+    content = '|'.join(patterns)
+    keyword_pattern = general_pattern.format(id=id, content=content)
+    return keyword_pattern
 
 
 def main():
-    for_search = collect_from_template()
-
-    def get_column_name_pattern(name):
-        # Use free variable 'for_search'.
-        general_pattern = '(?P<{id}>{content})'
-        column_number = tuple(for_search.columns).index(name)
-        id = 'column{}'.format(column_number)
-        patterns = (x.replace(' ', r'[ \n]+') for x in get_alias(name))
-        content = '|'.join(patterns)
-        column_name_pattern = general_pattern.format(id=id, content=content)
-        return column_name_pattern
-
-    col_serie = for_search.columns.to_series()
-    column_name_pattern = col_serie.apply(get_column_name_pattern)
     config = configparser.ConfigParser()
     config.read('config.ini')
-    config['column_name_pattern'] = {}
-    for column_name, pattern in column_name_pattern.items():
-        config['column_name_pattern'][column_name] = pattern
+    config['keyword_pattern'] = {}
+    for_search = template.loc['search', template.loc['search'].notna()]
+    col_serie = for_search.index.to_series()
+    keyword_pattern = col_serie.apply(produce_keyword_pattern)
+    for name, pattern in keyword_pattern.items():
+        config['keyword_pattern'][name] = pattern
     with open('config.ini', mode='w') as configfile:
         config.write(configfile)
-    with pd.ExcelWriter('re_patterns.xlsx') as writer:
-        for_search.to_excel(writer, sheet_name='for_search')
-        # Is this needed?
-        # template.to_excel(writer, sheet_name='Sheet2')
+
 
 if __name__ == '__main__':
     main()

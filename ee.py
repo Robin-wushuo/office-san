@@ -11,7 +11,7 @@ import re
 import tempfile
 import zipfile
 
-from collections import namedtuple
+from collections import namedtuple, abc
 
 import pandas as pd
 
@@ -274,17 +274,12 @@ def collect_alias(column_name):
     return head_pattern
 
 
-
-
-
-
 def get_subgroup_name(name):
     try:
         result = config['group_user'][name]
     except AttributeError:
         result = name
     return result
-
 
 
 def _get_function(value):
@@ -440,67 +435,64 @@ class Crawler(object):
         return data
 
 
-with pd.ExcelFile('re_patterns.xlsx') as xls:
-    search_info = pd.read_excel(xls, 'for_search', index_col=0)
+def find(text: str, keys: abc.Collection, start=0, basket={}):
+    result1 = find1(text, keys, start)
+    start, collected = result1.popitem()
+    basket.update(collected)
+    remain_keys = config['keyword_pattern'].keys() - basket.keys()
+    if collected and remain_keys:
+        basket = find(text, remain_keys, start, basket)
+    elif remain_keys:
+        print('"""', 'Not found')
+        print(remain_keys)
+        print('"""')
+        print()
+    return basket
 
-# Extract names of match groups.
-group_users = search_info.loc[
-        ['group_user', 'group'], search_info.loc['group_user'].notna()]
 
-# Collect keywords which include aliases of all column names.
-keyword_pattern = '|'.join(config['column_name_pattern'].values())
-# TODO: Add positive lookbehind assertion.
-template_pattern = (
-        r'{column}\s*(\s+\w+\s+)??\s*[:：]?\s*(?P<_content>{content})')
-
+finding = template.loc['value'].map(_get_function)
+from extract_pattern_from_template import get_column_name
 # TODO: Let fetch work as before.
-# TODO: Change logic: Look for two columns in page.
 # TODO: Add a function to check match result.
-def fetch(text, keyword_pattern=keyword_pattern, pattern=template_pattern):
-    # Search keywords.
-    # TODO: Handle the simplest case.
-    keyword_reo = re.compile(keyword_pattern, re.IGNORECASE)
-    keyword_mo = keyword_reo.search(text)
-    # Try to match the content.
-    if keyword_mo:
-        # Get column name.
-        group_name = keyword_mo.lastgroup
-        column_number = int(group_name.strip('column'))
-        column_name = search_info.columns[column_number]
-        # TODO: pdb new implement. Check patterns in config.ini .
-        # TODO: fetch text[2317:].
-        name_pat = config['column_name_pattern'][column_name]
-        content_pat = config['content_pattern'][column_name]
-        column_pattern = pattern.format(column=name_pat, content=content_pat)
-        column_mo = re.match(column_pattern, text[keyword_mo.start():])
-        if column_mo:  # Recursive function: Base case.
-            # TODO: Why does content not match?
-            # TODO: Remove the found keywords.
-            # Maybe content is a group of the result.
-            try:
-                user = group_users[column_name].str.split(',', expand=True)
-            except KeyError:
-                search_info.at['value', name] = column_mo.group('_content')
-            else:
-                for number in user:
-                    group = user.loc['group', number]
-                    column_name = user.loc['group_user', number]
-                    search_info.at['value', column_name] = column_mo.group(
-                            group)
-            return search_info.loc['value']
-        else:  # Recursive case.
-            text = text[keyword_mo.end():]
-            fetch(text)
+# TODO: How about define all keywords, include the useless ones?
+# To make tabulating possible in this way. And even don't
+# need to match content by regular expression.
+# TODO: Is it able to use several found keys to find the schedule table.
+# For example, use normal distribution to check key's position.
+def find1(text: str, keys: abc.Collection, start: int = 0) -> dict:
+    pattern = r"\n[\d. ]*(?i:%s)\s*(\s+\w+\s+)??\s*[:：]?\s*%s"
+    patterns = []
+    for k in keys:
+        keyword = config['keyword_pattern'][k]
+        content = config['content_pattern'][k]
+        combine = pattern % (keyword, content)
+        patterns.append(combine)
+    complete_pattern = '|'.join(patterns)
+    mo = re.search(complete_pattern, text[start:])
+    if mo:
+        start += mo.end()
+        result = {start: {}}
+        for k, v in mo.groupdict().items():
+            if v and k.startswith('value'):
+                name = get_column_name(k)
+                result[start][name] = (result[start].setdefault(name, '')
+                        + ' ' + v).strip()
     else:
-        return None
+        result = {0: {}}
+    return result
+
 
 import tika.parser
-def test(filename='Wit.pdf'):
+import pprint
+import sys
+def test():
     dataframe = template['value':'value'].applymap(_get_function)
-    parsed = tika.parser.from_file(filename)
+    parsed = tika.parser.from_file(sys.argv[1])
     text = parsed['content']
     text = _cut(text, pages=9)
-    value_s = fetch(text)
+    all_keys = config['keyword_pattern'].keys()
+    result = find(text, all_keys)
+    pprint.pprint(result)
 
 if __name__ == '__main__':
     test()
